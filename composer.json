@@ -20,7 +20,7 @@
         "ext-mbstring": "*"
     },
     "autoload": {
-        "psr-4": {"Sofi\\Base\\": ""}
+        "psr-4": {"Sofi\\Base\\": "src"}
     },
     "extra": {
         "branch-alias": {
