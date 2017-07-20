@@ -1,6 +1,6 @@
 <?php
 
-namespace Sofi\interfaces;
+namespace Sofi\Base\interfaces;
 
 interface CollectionInterface extends \ArrayAccess, \Countable, \IteratorAggregate
 {

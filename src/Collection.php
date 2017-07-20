@@ -1,10 +1,10 @@
 <?php
 
-namespace Sofi;
+namespace Sofi\Base;
 
-use Sofi\interfaces;
+use Sofi\Base\interfaces\CollectionInterface;
 
-class Collection implements interfaces\CollectionInterface
+class Collection implements CollectionInterface
 {
 
     /**
@@ -186,7 +186,7 @@ class Collection implements interfaces\CollectionInterface
      */
     public function getIterator()
     {
-        return new ArrayIterator($this->data);
+        return new \ArrayIterator($this->data);
     }
 
 }
