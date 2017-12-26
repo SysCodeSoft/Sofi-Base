@@ -24,6 +24,10 @@ class Sofi
         'ini' => [
             'display_errors' => true
         ],
+        'paths' => [
+            'app\\' => 'app',
+            'modules\\' => 'modules',
+        ],
         'autoloader' => false,
         'session' => true,
         'application-class' => 'Sofi\Application'
@@ -31,26 +35,21 @@ class Sofi
     static protected $app = null;
     static private $baseAppConfig = [
         'components' => [
-            'Response' => 'Sofi\HTTP\message\Response',
-            'Request' => [
-                'class' => 'Sofi\HTTP\message\Request',
-                'creator' => 'createFromGlobals'
-            ],
             'Router' => 'Sofi\Router\Router',
             'Layout' => [
                 'class' => 'Sofi\mvc\Layout',
-                'params' => [],
                 'name' => 'main/main'
             ]
         ]
     ];
+    static public $Loader = null;
 
     /**
      * Возвращает true если запущенно из консоли
      * 
      * @return boolean
      */
-    public static function isConsole()
+    public static function isConsole(): bool
     {
         return PHP_SAPI == 'cli' ||
                 (!isset($_SERVER['DOCUMENT_ROOT']) &&
@@ -66,8 +65,8 @@ class Sofi
     {
         self::$general = array_merge(self::$general, $config);
     }
-    
-    public static function getAppConfig()
+
+    public static function getAppConfig(): array
     {
         return self::$baseAppConfig;
     }
@@ -82,7 +81,7 @@ class Sofi
      * @param array $config
      * @return \Sofi\Base\Sofi
      */
-    public static function init($config = [])
+    public static function init($config = [], $loader = null)
     {
         /**
          * Определение пути запуска скрипта
@@ -93,7 +92,14 @@ class Sofi
         }
 
         if (!defined('BASE_PATH')) {
-            define('BASE_PATH', dirname(PUBLIC_PATH) . DS);
+            define('BASE_PATH', realpath(dirname(PUBLIC_PATH)) . DS);
+        }
+
+        if (is_object($loader)) {
+            self::$Loader = $loader;
+            foreach (self::$general['paths'] as $name => $path) {
+                self::$Loader->addPsr4($name, BASE_PATH . $path);
+            }
         }
 
         self::addConfig($config);
@@ -126,7 +132,7 @@ class Sofi
      * @param array $config
      * @return \Sofi\Application
      */
-    static function app($config = null)
+    static function app($config = null): \Sofi\Application
     {
         if (self::$app == null) {
             if (is_array($config)) {
@@ -134,36 +140,66 @@ class Sofi
             } else {
                 $config = self::getAppConfig();
             }
-            self::$app = self::createObject(self::$general['application-class'], $config);
+            self::$app = self::createObject(self::$general['application-class'], [null], $config);
 //            Sofi::d($config);
         }
 
+//        Sofi::d(self::$app);
         return self::$app;
     }
 
-    public static function createObject($type, $params = [])
+    /**
+     * 
+     * @param mixed $type - Параметры создания объекта (строка, массив, замыкание)
+     * @param mixed $constructParams - Параметр используемый при создании объекта
+     * @param array $initParams - Параметры инициализации
+     * @return \Sofi\Base\type - Возвращает созданный объект
+     * @throws exceptions\InvalidConfig
+     */
+    public static function createObject($type, $constructParams = null, $initParams = [])
     {
         if (is_string($type)) {
-            $class = new $type();
-            if (method_exists($class, 'init')) {
-                $class->init($params);
-                //call_user_func([$class, 'init'], $params);
+            if (is_array($constructParams)) {
+                $r = new \ReflectionClass($type);
+                if ($r->getConstructor()) {
+                    $obj = $r->newInstanceArgs($constructParams);
+                } else {
+                    $obj = new $type;
+                }
+//                $obj = new $type(...$constructParams);
+            } else {
+                $obj = new $type();
+            }
+            if (method_exists($obj, 'init')) {
+//                echo '...';
+//                Sofi::d($initParams);
+                $obj->init($initParams);
             }
 
-            return $class;
+            return $obj;
         } elseif (is_array($type) && isset($type['class'])) {
             $class = $type['class'];
             unset($type['class']);
 
             if (isset($type['creator'])) {
-                $method = $type['creator'];
-                return $class::$method($params);
-                //return call_user_func_array([$class,$method], $params); //$class::$method(... $params);
+                $creator_params = (is_array($type['creator']['params'])) ? $type['creator']['params'] : $constructParams;
+                if (isset($type['creator']['method'])) {
+                    $method = $type['creator']['method'];
+                    $obj = $class::$method($creator_params);
+                    if (method_exists($obj, 'init')) {
+                        unset($type['creator']);
+                        $obj->init($type);
+                    }
+                } else {
+                    unset($type['creator']);
+                    return static::createObject($class, $creator_params, $type);
+                }
+                return $obj;
             } else {
-                return static::createObject($class, $type);
+                return static::createObject($class, $constructParams, $type);
             }
         } elseif (is_callable($type, true)) {
-            return call_user_func_array($type, $params); // $type()(... $params);
+            return call_user_func_array($type, $initParams);
         } elseif (is_array($type)) {
             throw new exceptions\InvalidConfig('Object configuration must be an array containing a "class" element.');
         } else {
@@ -171,13 +207,14 @@ class Sofi
         }
     }
 
-    static function exec($action, array $params = [])
+    static function exec($action, array $params = [], array $injections = [])
     {
         // замыкание
         if ($action instanceof \Closure) {
-            return call_user_func_array($action, $params);
+//            return call_user_func_array($action, $params);
+            return $action(...array_values($params), ...array_values($injections));
         } elseif (is_callable($action)) {
-            return $action(...array_values($params));
+            return $action(...array_values($params), ...array_values($injections));
 
             // Строка
         } elseif (is_string($action)) {
@@ -188,60 +225,81 @@ class Sofi
             }
 
             $callback = explode('@', $action);
-            $class = static::createObject($callback[0]);
+//            Sofi::d($injections);
+            $obj = static::createObject($callback[0], [], $injections);
 
-            if (method_exists($class, $callback[1])) {
-                return call_user_func_array([$class, $callback[1]], $params);
+            if (method_exists($obj, $callback[1])) {
+                return call_user_func_array([$obj, $callback[1]], $params);
             } else {
                 throw new exceptions\InvalidRouteCallback('Bad method callback ' . $action);
             }
 
             //  Массив
         } elseif (is_array($action)) {
-            $class = static::createObject($action);
+            $obj = static::createObject($action, [], $injections);
 
-            return $class->__invoke($params);
+            return $obj->__invoke($params);
         }
     }
-    
-    public static function getObjectVars($object)
+
+    public static function getObjectVars($object): array
     {
         return get_object_vars($object);
     }
 
-    static function out($var, $shift = '')
+    static function out($var, $shift = '', $index = 1, $level = 3)
     {
+        if ($index > $level)
+            return;
+
+        if ($index == 0)
+            echo '<div class="sofi-debug">';
+
+        $index++;
+
+        $new_shift = '&nbsp;&nbsp;&nbsp;';
         if (is_array($var)) {
+            if ($index == 1) {
+                echo '<h3>' . $shift . '<b>Array</b></h3>';
+                $shift .= $new_shift;
+//                $index++;
+            }
             foreach ($var as $key => $item) {
                 if (is_array($item)) {
-                    echo $shift . ' ('. gettype($item).')' . '<b>' . $key . '</b><br>';
-                    self::out($item, $shift . '&nbsp;&nbsp;');
+                    echo '<h4>' . $shift . '<b>' . $key . '</b> <i>(' . gettype($item) . ')</i></h4>';
+                    self::out($item, $shift . $new_shift, $index);
                 } else {
                     if (is_object($item)) {
-                        echo $shift . ' ('. gettype($item).')' . '<b>' . $key . '</b><br>';
-                        self::out($item, $shift . '&nbsp;&nbsp;');
+                        echo '<h4>' . $shift . '<b><a href="#' . spl_object_hash($item) . '">' . $key . '</a></b> <i>(' . get_class($item) . ')</i></h4>';
+                        self::out($item, $shift . $new_shift, $index);
                     } else {
-                        echo $shift . ' ('. gettype($item).')' . $key . ' = ' . $item . '<br>';
+                        echo '<p>' . $shift . '<b>' . $key . '</b> = ' . $item . ' <i>(' . gettype($item) . ')</i></p>';
                     }
                 }
             }
         } elseif (is_object($var)) {
-            echo $shift . '<b>Object</b><br>';
-            self::out(self::getObjectVars($var), $shift . '&nbsp;&nbsp;');
+            if ($index == 1) {
+                echo '<a name="' . spl_object_hash($var) . '"></a>';
+                echo '<h3>' . $shift . '<b>Object</b><i>(' . get_class($var) . ')</i></h3>';
+            }
+//            var_dump(self::getObjectVars($var));
+            self::out((array) ($var), $shift . $new_shift, $index);
         } else {
             echo $var . '<br>';
         }
+        if ($index == 1)
+            echo '</div>';
     }
 
-    static function d($vars, $terminate = false)
+    static function d($vars, $terminate = false, $level = 3)
     {
-        self::out($vars);
+        self::out($vars, '', 0, $level);
 
         if ($terminate) {
             exit(9);
         }
     }
-    
+
     static function _($attr)
     {
         return $attr;
