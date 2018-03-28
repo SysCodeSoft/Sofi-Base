@@ -9,6 +9,10 @@ define('DS', DIRECTORY_SEPARATOR);
 
 class Sofi
 {
+    
+    const SOFI_MODE_DEV  = 4;
+    const SOFI_MODE_TEST = 2;
+    const SOFI_MODE_PROD = 0;
 
     /**
      * Базовые настройким <br>
@@ -32,7 +36,7 @@ class Sofi
         'session' => true,
         'application-class' => 'Sofi\Application'
     ];
-    static protected $app = null;
+    static public $Loader = null;
     static private $baseAppConfig = [
         'components' => [
             'Router' => 'Sofi\Router\Router',
@@ -42,7 +46,9 @@ class Sofi
             ]
         ]
     ];
-    static public $Loader = null;
+    static protected $app = null;
+    
+    static protected $dev = null;
 
     /**
      * Возвращает true если запущенно из консоли
@@ -66,9 +72,11 @@ class Sofi
         self::$general = array_merge(self::$general, $config);
     }
 
-    public static function getAppConfig(): array
+    public static function getConfigFile($name, $path)
     {
-        return self::$baseAppConfig;
+        if (file_exists($path . $name . '.conf.php')) {
+            return require_once $path . $name . '.conf.php';
+        }
     }
 
     /**
@@ -95,14 +103,29 @@ class Sofi
             define('BASE_PATH', realpath(dirname(PUBLIC_PATH)) . DS);
         }
 
+        if (getenv('SOFI_DEVELOPER_MACHINE') === 'TRUE') {
+            define('SOFI_MODE', 4);
+            self::$dev = new Dev();
+        } else {
+            define('SOFI_MODE', 0);
+        }
+        
+        register_shutdown_function([Sofi::class,'done']);
+
+        self::addConfig(self::getConfigFile('sofi', BASE_PATH));
+        self::addConfig($config);
+
+        if (self::$general['project'] == '') {
+            echo 'Empty Project name';
+            die();
+        }
+
         if (is_object($loader)) {
             self::$Loader = $loader;
             foreach (self::$general['paths'] as $name => $path) {
                 self::$Loader->addPsr4($name, BASE_PATH . $path);
             }
         }
-
-        self::addConfig($config);
 
         /*
          * General init
@@ -127,6 +150,13 @@ class Sofi
         mb_regex_encoding(self::$general['charset']);
     }
 
+    public static function done()
+    {
+        if (SOFI_MODE > 0) {
+            self::$dev->done();
+        }
+    }
+
     /**
      * 
      * @param array $config
@@ -135,13 +165,16 @@ class Sofi
     static function app($config = null): \Sofi\Application
     {
         if (self::$app == null) {
+//            Sofi::d(debug_backtrace());
             if (is_array($config)) {
+//                var_dump($config);
                 $config = array_merge(static::$baseAppConfig, $config);
             } else {
-                $config = self::getAppConfig();
+                $config = static::$baseAppConfig;
             }
-            self::$app = self::createObject(self::$general['application-class'], [null], $config);
-//            Sofi::d($config);
+            self::$app = self::createObject(self::$general['application-class'], [null], []);
+            self::$app->init($config);
+//            Sofi::d(self::$app);
         }
 
 //        Sofi::d(self::$app);
@@ -170,9 +203,7 @@ class Sofi
             } else {
                 $obj = new $type();
             }
-            if (method_exists($obj, 'init')) {
-//                echo '...';
-//                Sofi::d($initParams);
+            if ($initParams != [] && method_exists($obj, 'init')) {
                 $obj->init($initParams);
             }
 
@@ -188,7 +219,8 @@ class Sofi
                     $obj = $class::$method($creator_params);
                     if (method_exists($obj, 'init')) {
                         unset($type['creator']);
-                        $obj->init($type);
+                        if ($type != [])
+                            $obj->init($type);
                     }
                 } else {
                     unset($type['creator']);
@@ -227,8 +259,12 @@ class Sofi
             $callback = explode('@', $action);
 //            Sofi::d($injections);
             $obj = static::createObject($callback[0], [], $injections);
-
-            if (method_exists($obj, $callback[1])) {
+            
+            if ($obj instanceof \Sofi\mvc\BaseController) {
+                return $obj->run($callback[1], $params);
+            }elseif ($obj instanceof \Sofi\mvc\Action) {
+                return $obj->run(...$params);
+            }elseif (method_exists($obj, $callback[1])) {
                 return call_user_func_array([$obj, $callback[1]], $params);
             } else {
                 throw new exceptions\InvalidRouteCallback('Bad method callback ' . $action);
@@ -247,53 +283,24 @@ class Sofi
         return get_object_vars($object);
     }
 
-    static function out($var, $shift = '', $index = 1, $level = 3)
+    protected static function out($var, $shift = '', $index = 0, $level = 10)
     {
-        if ($index > $level)
-            return;
-
-        if ($index == 0)
-            echo '<div class="sofi-debug">';
-
-        $index++;
-
-        $new_shift = '&nbsp;&nbsp;&nbsp;';
-        if (is_array($var)) {
-            if ($index == 1) {
-                echo '<h3>' . $shift . '<b>Array</b></h3>';
-                $shift .= $new_shift;
-//                $index++;
-            }
-            foreach ($var as $key => $item) {
-                if (is_array($item)) {
-                    echo '<h4>' . $shift . '<b>' . $key . '</b> <i>(' . gettype($item) . ')</i></h4>';
-                    self::out($item, $shift . $new_shift, $index);
-                } else {
-                    if (is_object($item)) {
-                        echo '<h4>' . $shift . '<b><a href="#' . spl_object_hash($item) . '">' . $key . '</a></b> <i>(' . get_class($item) . ')</i></h4>';
-                        self::out($item, $shift . $new_shift, $index);
-                    } else {
-                        echo '<p>' . $shift . '<b>' . $key . '</b> = ' . $item . ' <i>(' . gettype($item) . ')</i></p>';
-                    }
-                }
-            }
-        } elseif (is_object($var)) {
-            if ($index == 1) {
-                echo '<a name="' . spl_object_hash($var) . '"></a>';
-                echo '<h3>' . $shift . '<b>Object</b><i>(' . get_class($var) . ')</i></h3>';
-            }
-//            var_dump(self::getObjectVars($var));
-            self::out((array) ($var), $shift . $new_shift, $index);
-        } else {
-            echo $var . '<br>';
-        }
-        if ($index == 1)
-            echo '</div>';
+        self::$dev->out($var, $shift, $index, $level);
     }
 
-    static function d($vars, $terminate = false, $level = 3)
+    /**
+     * 
+     * @param mixed $expression
+     * @param type $level
+     * @param type $terminate
+     */
+    static function d($expression, $terminate = false, $level = 7)
     {
-        self::out($vars, '', 0, $level);
+        if (SOFI_MODE > 0) {
+            return;
+        }
+        
+        self::out($expression, '', 0, $level);
 
         if ($terminate) {
             exit(9);
@@ -315,4 +322,14 @@ class Sofi
         ;
     }
 
+}
+
+function _($msgid)
+{
+    \_($msgid);
+}
+
+function d($expression, $level = 7, $terminate = false)
+{
+    Sofi::d($expression, $level, $terminate);
 }
