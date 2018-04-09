@@ -296,7 +296,7 @@ class Sofi
      */
     static function d($expression, $terminate = false, $level = 7)
     {
-        if (SOFI_MODE > 0) {
+        if (SOFI_MODE == 0) {
             return;
         }
         
